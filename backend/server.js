@@ -2,70 +2,55 @@ import express from "express";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
-import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
+import { execFile } from "child_process";
 import ffmpegPath from "ffmpeg-static";
+import ytdlp from "yt-dlp-exec";
 
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// Use /tmp for Render or other restricted hosts
-const downloadsDir = "/tmp/downloads";
+const downloadsDir = "./downloads";
 if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
 
 const progressMap = {};
 const fileMap = {};
-const PYTHON_CMD = "python3"; // Render uses python3
 
-app.post("/download", (req, res) => {
+app.post("/download", async (req, res) => {
   const { url, format } = req.body;
   if (!url || !format) return res.status(400).json({ error: "Missing url or format" });
 
   const id = uuidv4();
+  const outputBase = path.join(downloadsDir, id);
   progressMap[id] = 0;
-  const tmpBase = path.join(downloadsDir, id);
 
-  const py = spawn(PYTHON_CMD, [
-    path.join(process.cwd(), "downloader.py"),
+  const ytdlpArgs = [
     url,
-    format,
-    tmpBase,
-  ], {
-    env: { ...process.env, FFMPEG_BINARY: ffmpegPath },
-  });
+    "--ffmpeg-location", ffmpegPath,
+    "-o", `${outputBase}.%(ext)s`
+  ];
 
-  console.log(`[${id}] Started download (${format}) for: ${url}`);
+  if (format === "mp3") {
+    ytdlpArgs.push("-x", "--audio-format", "mp3");
+  } else {
+    ytdlpArgs.push("-f", "bestvideo+bestaudio");
+  }
 
-  py.stdout.on("data", (data) => {
-    const text = data.toString();
-    const match = text.match(/(\d{1,3}(?:\.\d+)?)%/);
-    if (match) {
-      progressMap[id] = parseFloat(match[1]);
+  ytdlp(ytdlpArgs, {
+    stdio: "pipe",
+    onProgress: (prog) => {
+      if (prog.percent) progressMap[id] = parseFloat(prog.percent);
       console.log(`[${id}] Progress: ${progressMap[id]}%`);
     }
-  });
-
-  py.stderr.on("data", (data) => console.error(`[${id}] Python stderr:`, data.toString()));
-
-  py.on("close", (code) => {
-    console.log(`[${id}] Python exited with code ${code}`);
-    const mp3 = tmpBase + ".mp3";
-    const mp4 = tmpBase + ".mp4";
-
-    let finalFile = null;
-    if (fs.existsSync(mp3)) finalFile = mp3;
-    else if (fs.existsSync(mp4)) finalFile = mp4;
-
-    if (!finalFile) {
-      console.error(`[${id}] ❌ No output file found`);
-      delete progressMap[id];
-      return;
-    }
-
-    fileMap[id] = { path: finalFile, ext: path.extname(finalFile).replace(".", "") };
+  }).then(() => {
+    const filePath = format === "mp3" ? `${outputBase}.mp3` : `${outputBase}.mp4`;
+    fileMap[id] = { path: filePath, ext: format };
     progressMap[id] = 100;
-    console.log(`[${id}] ✅ File ready: ${finalFile}`);
+    console.log(`[${id}] ✅ File ready: ${filePath}`);
+  }).catch((err) => {
+    console.error(`[${id}] Download error:`, err);
+    delete progressMap[id];
   });
 
   res.json({ id });
@@ -79,21 +64,13 @@ app.get("/progress/:id", (req, res) => {
 app.get("/file/:id", (req, res) => {
   const id = req.params.id;
   const info = fileMap[id];
-  if (!info || !fs.existsSync(info.path)) {
-    delete fileMap[id];
-    delete progressMap[id];
-    return res.status(404).json({ error: "File not ready or missing" });
-  }
+  if (!info || !fs.existsSync(info.path)) return res.status(404).json({ error: "File not ready" });
 
-  const stat = fs.statSync(info.path);
-  res.setHeader("Content-Length", stat.size);
   res.setHeader("Content-Disposition", `attachment; filename="download.${info.ext}"`);
-
   const stream = fs.createReadStream(info.path);
   stream.pipe(res);
-
   stream.on("close", () => {
-    try { fs.unlinkSync(info.path); } catch (e) { console.error(e); }
+    fs.unlinkSync(info.path);
     delete fileMap[id];
     delete progressMap[id];
     console.log(`[${id}] File deleted after download`);
