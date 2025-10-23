@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: mp3-mp4-downloader
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PYTHON_CMD
+        value: python3
