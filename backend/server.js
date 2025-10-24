@@ -2,98 +2,149 @@ import express from "express";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
+import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
-import { fileURLToPath } from "url";
-import { exec } from "child_process";
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const youtubedl = require("yt-dlp-exec");
-
-// File path setup
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import ffmpegPath from "ffmpeg-static";
 
 const app = express();
-const PORT = process.env.PORT || 5000;
-
 app.use(cors());
 app.use(express.json());
 
-// Ensure downloads folder exists
-const DOWNLOAD_DIR = path.join(__dirname, "downloads");
-if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
+const __dirname = path.resolve();
+const DOWNLOADS_DIR = path.join(__dirname, "downloads");
 
-// Root check
-app.get("/", (req, res) => {
-  res.send("✅ MP3/MP4 Downloader Backend is running on Render!");
-});
+// ✅ Detect yt-dlp binary depending on OS
+const isWindows = process.platform === "win32";
+const YT_DLP_PATH = isWindows
+  ? path.join(__dirname, "yt-dlp.exe")
+  : "yt-dlp"; // Linux/macOS: use global yt-dlp command
 
-// Video info route
-app.post("/api/info", async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "Missing URL" });
+// ✅ ffmpeg-static automatically resolves correct binary for platform
+const FFMPEG_PATH = ffmpegPath;
 
-  try {
-    const info = await youtubedl(url, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      noCallHome: true,
-      preferFreeFormats: true,
-    });
-    res.json({
-      title: info.title,
-      thumbnail: info.thumbnail,
-      formats: info.formats
-        .filter((f) => f.ext && f.filesize)
-        .map((f) => ({
-          format_id: f.format_id,
-          ext: f.ext,
-          resolution: f.height ? `${f.height}p` : "audio",
-          filesize: f.filesize,
-        })),
-    });
-  } catch (err) {
-    console.error("Error fetching info:", err);
-    res.status(500).json({ error: "Failed to fetch video info" });
-  }
-});
+// Create downloads folder if it doesn't exist
+if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
 
-// Download MP4 or MP3
-app.post("/api/download", async (req, res) => {
+// In-memory download tracking
+const downloads = {}; // { id: { progress, filePath, error } }
+
+// Start download
+app.post("/download", (req, res) => {
   const { url, format } = req.body;
-  if (!url || !format) return res.status(400).json({ error: "Missing parameters" });
-
   const id = uuidv4();
-  const outputPath = path.join(DOWNLOAD_DIR, `${id}.${format === "mp3" ? "mp3" : "mp4"}`);
 
-  try {
-    console.log(`Starting ${format.toUpperCase()} download for: ${url}`);
+  const outputFile =
+    format === "mp3"
+      ? path.join(DOWNLOADS_DIR, `${id}.mp3`)
+      : path.join(DOWNLOADS_DIR, `${id}.mp4`);
 
-    const ydlOptions =
-      format === "mp3"
-        ? {
-            extractAudio: true,
-            audioFormat: "mp3",
-            output: outputPath,
-          }
-        : {
-            format: "bestvideo+bestaudio",
-            mergeOutputFormat: "mp4",
-            output: outputPath,
-          };
+  downloads[id] = { progress: 0, filePath: outputFile, error: false };
 
-    await youtubedl(url, ydlOptions);
+  console.log(`[${id}] Starting download (${format}) for: ${url}`);
 
-    // File ready
-    res.download(outputPath, (err) => {
-      if (err) console.error("Download error:", err);
-      fs.unlink(outputPath, () => console.log(`🧹 Deleted: ${outputPath}`));
-    });
-  } catch (err) {
-    console.error("Download failed:", err);
-    res.status(500).json({ error: "Download failed" });
-  }
+  // Choose correct yt-dlp arguments
+  const args = (() => {
+    if (format === "mp3") {
+      return [
+        url,
+        "--extract-audio",
+        "--audio-format",
+        "mp3",
+        "-o",
+        outputFile,
+        "--ffmpeg-location",
+        FFMPEG_PATH,
+      ];
+    } else {
+      if (url.includes("youtube.com") || url.includes("youtu.be")) {
+        return [
+          url,
+          "-f",
+          "bestvideo[height<=720]+bestaudio/best[height<=720]",
+          "--merge-output-format",
+          "mp4",
+          "-o",
+          outputFile,
+          "--ffmpeg-location",
+          FFMPEG_PATH,
+        ];
+      } else {
+        // Instagram / Facebook fallback
+        return [
+          url,
+          "-f",
+          "bestvideo+bestaudio/best",
+          "--merge-output-format",
+          "mp4",
+          "-o",
+          outputFile,
+          "--ffmpeg-location",
+          FFMPEG_PATH,
+        ];
+      }
+    }
+  })();
+
+  const proc = spawn(YT_DLP_PATH, args);
+
+  proc.stderr.on("data", (data) => {
+    const text = data.toString();
+    const match = text.match(/(\d+\.\d+)%/);
+    if (match) downloads[id].progress = parseFloat(match[1]);
+    console.log(`[${id}] ${text}`);
+  });
+
+  proc.on("close", (code) => {
+    if (code === 0) {
+      downloads[id].progress = 100;
+      console.log(`[${id}] ✅ Download complete`);
+    } else {
+      downloads[id].error = true;
+      console.log(`[${id}] ❌ Download failed with code ${code}`);
+    }
+  });
+
+  proc.on("error", (err) => {
+    downloads[id].error = true;
+    console.error(`[${id}] ❌ Failed to start yt-dlp:`, err);
+  });
+
+  res.json({ id });
 });
 
-// Start server
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+// Progress endpoint
+app.get("/progress/:id", (req, res) => {
+  const id = req.params.id;
+  const info = downloads[id];
+  if (!info) return res.status(404).json({ error: "Not found" });
+
+  res.json({
+    progress: info.progress || 0,
+    error: info.error || false,
+  });
+});
+
+// Serve and delete file after download
+app.get("/downloaded/:id", (req, res) => {
+  const id = req.params.id;
+  const info = downloads[id];
+
+  if (!info || !fs.existsSync(info.filePath)) {
+    return res.status(404).json({ error: "File not found" });
+  }
+
+  res.download(info.filePath, path.basename(info.filePath), (err) => {
+    if (err) {
+      console.error(`[${id}] ❌ Error sending file:`, err);
+    } else {
+      fs.unlink(info.filePath, (err) => {
+        if (err) console.error(`[${id}] ❌ Error deleting file:`, err);
+        else console.log(`[${id}] ✅ File deleted`);
+      });
+      delete downloads[id];
+    }
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
