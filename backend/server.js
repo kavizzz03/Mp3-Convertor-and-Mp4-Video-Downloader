@@ -2,8 +2,9 @@ import express from "express";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
-import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
+import ytdlpExec from "yt-dlp-exec";
+import ffmpegPath from "ffmpeg-static";
 
 const app = express();
 app.use(cors());
@@ -11,8 +12,6 @@ app.use(express.json());
 
 const __dirname = path.resolve();
 const DOWNLOADS_DIR = path.join(__dirname, "downloads");
-const YT_DLP_PATH = path.join(__dirname, "yt-dlp.exe"); // your local yt-dlp binary
-const FFMPEG_PATH = path.join(__dirname, "node_modules", "ffmpeg-static", "ffmpeg.exe");
 
 // Create downloads folder if it doesn't exist
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
@@ -21,10 +20,9 @@ if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
 const downloads = {}; // { id: { progress, filePath, error } }
 
 // Start download
-app.post("/download", (req, res) => {
+app.post("/download", async (req, res) => {
   const { url, format } = req.body;
   const id = uuidv4();
-
   const outputFile =
     format === "mp3"
       ? path.join(DOWNLOADS_DIR, `${id}.mp3`)
@@ -34,75 +32,39 @@ app.post("/download", (req, res) => {
 
   console.log(`[${id}] Starting download (${format}) for: ${url}`);
 
-  // Platform-aware format selection
-  const args = (() => {
-    if (format === "mp3") {
-      return [
-        url,
-        "--extract-audio",
-        "--audio-format",
-        "mp3",
-        "-o",
-        outputFile,
-        "--ffmpeg-location",
-        FFMPEG_PATH,
-      ];
-    } else {
-      if (url.includes("youtube.com") || url.includes("youtu.be")) {
-        return [
-          url,
-          "-f",
-          "bestvideo[height<=720]+bestaudio/best[height<=720]",
-          "--merge-output-format",
-          "mp4",
-          "-o",
-          outputFile,
-          "--ffmpeg-location",
-          FFMPEG_PATH,
-        ];
-      } else {
-        // Instagram / Facebook
-        return [
-          url,
-          "-f",
-          "bestvideo+bestaudio/best",
-          "--merge-output-format",
-          "mp4",
-          "-o",
-          outputFile,
-          "--ffmpeg-location",
-          FFMPEG_PATH,
-        ];
-      }
-    }
-  })();
+  try {
+    // Start yt-dlp download
+    const ytdlpProcess = ytdlpExec(url, {
+      ffmpegLocation: ffmpegPath,
+      extractAudio: format === "mp3",
+      audioFormat: format === "mp3" ? "mp3" : undefined,
+      format:
+        format === "mp4"
+          ? "bestvideo[height<=720]+bestaudio/best[height<=720]"
+          : undefined,
+      output: outputFile,
+      progressHook: (progress) => {
+        if (progress && progress.percent) downloads[id].progress = progress.percent;
+        console.log(`[${id}] Download progress: ${downloads[id].progress.toFixed(1)}%`);
+      },
+    });
 
-  const proc = spawn(YT_DLP_PATH, args);
+    ytdlpProcess
+      .then(() => {
+        downloads[id].progress = 100;
+        console.log(`[${id}] ✅ Download complete`);
+      })
+      .catch((err) => {
+        downloads[id].error = true;
+        console.error(`[${id}] ❌ Download failed:`, err);
+      });
 
-  // Track progress from stderr
-  proc.stderr.on("data", (data) => {
-    const text = data.toString();
-    const match = text.match(/(\d+\.\d+)%/);
-    if (match) downloads[id].progress = parseFloat(match[1]);
-    console.log(`[${id}] ${text}`);
-  });
-
-  proc.on("close", (code) => {
-    if (code === 0) {
-      downloads[id].progress = 100;
-      console.log(`[${id}] ✅ Download complete`);
-    } else {
-      downloads[id].error = true;
-      console.log(`[${id}] ❌ Download failed with code ${code}`);
-    }
-  });
-
-  proc.on("error", (err) => {
+    res.json({ id });
+  } catch (err) {
     downloads[id].error = true;
-    console.error(`[${id}] ❌ Failed to start yt-dlp:`, err);
-  });
-
-  res.json({ id });
+    console.error(`[${id}] ❌ Failed to start download:`, err);
+    res.status(500).json({ error: "Failed to start download" });
+  }
 });
 
 // Progress endpoint
@@ -139,6 +101,6 @@ app.get("/downloaded/:id", (req, res) => {
   });
 });
 
-app.listen(5000, () =>
-  console.log("🚀 Backend running on http://localhost:5000")
-);
+// Start server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Backend running on http://localhost:${PORT}`));
