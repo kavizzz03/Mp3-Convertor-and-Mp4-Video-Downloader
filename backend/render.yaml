@@ -1,10 +1,15 @@
-services:
-  - type: web
-    name: mp3-mp4-downloader
-    env: node
-    plan: free
-    buildCommand: |
-      apt-get update && apt-get install -y python3 python3-pip
-      pip install -U yt-dlp
-      npm install
-    startCommand: node server.js
+{
+  "name": "mp3-mp4-downloader",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "uuid": "^9.0.0",
+    "yt-dlp-exec": "^2.0.2"
+  }
+}
