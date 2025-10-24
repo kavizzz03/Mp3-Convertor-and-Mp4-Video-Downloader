@@ -2,8 +2,9 @@ services:
   - type: web
     name: mp3-mp4-downloader
     env: node
-    buildCommand: npm install
+    plan: free
+    buildCommand: |
+      apt-get update && apt-get install -y python3 python3-pip
+      pip install -U yt-dlp
+      npm install
     startCommand: node server.js
-    envVars:
-      - key: PYTHON_CMD
-        value: python3
