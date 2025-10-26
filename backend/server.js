@@ -13,51 +13,54 @@ app.use(express.json());
 const __dirname = path.resolve();
 const DOWNLOADS_DIR = path.join(__dirname, "downloads");
 
-// ✅ Detect yt-dlp binary depending on OS
+if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
+
 const isWindows = process.platform === "win32";
 const YT_DLP_PATH = isWindows
   ? path.join(__dirname, "yt-dlp.exe")
-  : "yt-dlp"; // Linux/macOS: use global yt-dlp command
+  : "yt-dlp";
 
-// ✅ ffmpeg-static automatically resolves correct binary for platform
 const FFMPEG_PATH = ffmpegPath;
+const downloads = {}; // { id: { progress, filePath, error, format, url } }
 
-// Create downloads folder if it doesn't exist
-if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR);
-
-// In-memory download tracking
-const downloads = {}; // { id: { progress, filePath, error } }
-
-// Start download
+// ✅ Start a new download
 app.post("/download", (req, res) => {
   const { url, format } = req.body;
-  const id = uuidv4();
 
+  if (!url || !format) {
+    return res.status(400).json({ error: "Missing URL or format" });
+  }
+
+  const id = uuidv4();
   const outputFile =
     format === "mp3"
       ? path.join(DOWNLOADS_DIR, `${id}.mp3`)
       : path.join(DOWNLOADS_DIR, `${id}.mp4`);
 
-  downloads[id] = { progress: 0, filePath: outputFile, error: false };
+  downloads[id] = {
+    progress: 0,
+    filePath: outputFile,
+    error: false,
+    format,
+    url,
+  };
 
-  console.log(`[${id}] Starting download (${format}) for: ${url}`);
+  console.log(`\n🎬 [${id}] Starting ${format.toUpperCase()} download for: ${url}`);
 
-  // Choose correct yt-dlp arguments
-  const args = (() => {
-    if (format === "mp3") {
-      return [
-        url,
-        "--extract-audio",
-        "--audio-format",
-        "mp3",
-        "-o",
-        outputFile,
-        "--ffmpeg-location",
-        FFMPEG_PATH,
-      ];
-    } else {
-      if (url.includes("youtube.com") || url.includes("youtu.be")) {
-        return [
+  // yt-dlp arguments
+  const args =
+    format === "mp3"
+      ? [
+          url,
+          "--extract-audio",
+          "--audio-format",
+          "mp3",
+          "-o",
+          outputFile,
+          "--ffmpeg-location",
+          FFMPEG_PATH,
+        ]
+      : [
           url,
           "-f",
           "bestvideo[height<=720]+bestaudio/best[height<=720]",
@@ -68,51 +71,44 @@ app.post("/download", (req, res) => {
           "--ffmpeg-location",
           FFMPEG_PATH,
         ];
-      } else {
-        // Instagram / Facebook fallback
-        return [
-          url,
-          "-f",
-          "bestvideo+bestaudio/best",
-          "--merge-output-format",
-          "mp4",
-          "-o",
-          outputFile,
-          "--ffmpeg-location",
-          FFMPEG_PATH,
-        ];
-      }
-    }
-  })();
 
   const proc = spawn(YT_DLP_PATH, args);
 
+  // ✅ Realtime progress parser
   proc.stderr.on("data", (data) => {
     const text = data.toString();
-    const match = text.match(/(\d+\.\d+)%/);
-    if (match) downloads[id].progress = parseFloat(match[1]);
-    console.log(`[${id}] ${text}`);
+    const match = text.match(/(\d+(?:\.\d+)?)%/);
+
+    if (match) {
+      const percent = parseFloat(match[1]);
+      downloads[id].progress = percent;
+
+      // ✅ show progress on console nicely
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+      process.stdout.write(`📥 [${id}] Progress: ${percent.toFixed(1)}%`);
+    }
   });
 
   proc.on("close", (code) => {
     if (code === 0) {
       downloads[id].progress = 100;
-      console.log(`[${id}] ✅ Download complete`);
+      console.log(`\n✅ [${id}] Download complete: ${outputFile}`);
     } else {
       downloads[id].error = true;
-      console.log(`[${id}] ❌ Download failed with code ${code}`);
+      console.log(`\n❌ [${id}] Download failed (code ${code})`);
     }
   });
 
   proc.on("error", (err) => {
     downloads[id].error = true;
-    console.error(`[${id}] ❌ Failed to start yt-dlp:`, err);
+    console.error(`\n❌ [${id}] yt-dlp process error:`, err);
   });
 
   res.json({ id });
 });
 
-// Progress endpoint
+// ✅ Progress endpoint (frontend polls this)
 app.get("/progress/:id", (req, res) => {
   const id = req.params.id;
   const info = downloads[id];
@@ -124,7 +120,7 @@ app.get("/progress/:id", (req, res) => {
   });
 });
 
-// Serve and delete file after download
+// ✅ Serve and delete file after download
 app.get("/downloaded/:id", (req, res) => {
   const id = req.params.id;
   const info = downloads[id];
@@ -138,8 +134,8 @@ app.get("/downloaded/:id", (req, res) => {
       console.error(`[${id}] ❌ Error sending file:`, err);
     } else {
       fs.unlink(info.filePath, (err) => {
-        if (err) console.error(`[${id}] ❌ Error deleting file:`, err);
-        else console.log(`[${id}] ✅ File deleted`);
+        if (err) console.error(`[${id}] ❌ File delete error:`, err);
+        else console.log(`🧹 [${id}] File deleted`);
       });
       delete downloads[id];
     }
@@ -147,4 +143,6 @@ app.get("/downloaded/:id", (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`🚀 Backend running on http://localhost:${PORT}`)
+);
