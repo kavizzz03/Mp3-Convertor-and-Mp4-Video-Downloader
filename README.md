@@ -21,7 +21,7 @@ Built with Node.js, Express, React, and powerful open-source media tools.
 Mp3-Convertor-and-Mp4-Video-Downloader/
 │
 ├── server.js # Node.js backend - handles download & conversion
-├── downloader.js # Helper module for video/audio download logic
+├── downloader.py # Helper module for video/audio download logic
 ├── Frontend/ # React frontend UI
 │ ├── App.jsx
 │ ├── components/
@@ -39,7 +39,7 @@ Mp3-Convertor-and-Mp4-Video-Downloader/
 | Layer | Technology |
 |-------|-------------|
 | Frontend | React, Axios, Tailwind CSS |
-| Backend | Node.js, Express |
+| Backend | Node.js, Express, Python |
 | Video Processing | `yt-dlp`, `ffmpeg` |
 | File Handling | `multer`, `fs`, `path` |
 | Conversion | `ffmpeg` audio extraction |
